@@ -1,0 +1,15 @@
+{
+    "name": "multicast-receiver",
+    "version": "0.0.1",
+    "description": "Sample program to test receiving UDP multicast",
+    "private": true,
+    "scripts": {},
+    "author": "rickkas7@github.com",
+    "contributors": [],
+    "license": "Apache Version 2.0",
+    "dependencies": {
+    },
+    "engines": {
+        "node": ">=12.0.0"
+    }
+}
