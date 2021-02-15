@@ -9,6 +9,13 @@
 #include <vector>
 
 /**
+ * @brief The maximum number of servers you can add using withServer
+ * 
+ * Be careful modifying this, see RemoteLogBufferHeader
+ */
+const size_t REMOTELOG_MAX_SERVERS = 4;
+
+/**
  * @brief Structure typically stored in retained memory
  * 
  * Recommended size 2.5K (2560 bytes). Larger is better. Can be stored in regular
@@ -16,14 +23,15 @@
  * 65535 bytes as the size is stored in a uint16_t.
  * 
  * The RemoteLogBufHeader structure (not including data) cannot exceed 256 bytes
- * as the headerSize member is a uint8_t. It's currently 16 bytes.
+ * as the headerSize member is a uint8_t. It's currently 32 bytes.
  */
-typedef struct { // 16 bytes
+typedef struct { // 32 bytes
     uint32_t    magic;
     uint8_t     version;
     uint8_t     headerSize;
     uint16_t    bufLen;
     size_t      writeIndex;
+    size_t      readIndexes[REMOTELOG_MAX_SERVERS];
     uint32_t    reserved;
     // Data goes here
 } RemoteLogBufHeader;
@@ -59,7 +67,7 @@ public:
     /**
      * @brief Subclassed to handle server operations
      */
-    virtual void operation(OperationCode code, void *data) = 0;
+    virtual void operation(OperationCode code, void *data, size_t &readIndex) = 0;
 };
 
 /**
@@ -104,6 +112,8 @@ public:
      * You can add multiple servers if desired. You must add the servers before calling
      * the setup() method. You cannot remove servers once added. Adding servers after setup
      * is not supported, either.
+     * 
+     * The maximum number of servers you can add is REMOTELOG_MAX_SERVERS.
      */
     RemoteLog &withServer(RemoteLogServer *server);
 
@@ -283,7 +293,8 @@ public:
 protected:
     uint8_t *buf;
     size_t bufLen;
-    std::vector<RemoteLogServer *>servers;
+    RemoteLogServer *servers[REMOTELOG_MAX_SERVERS];
+    size_t numServers = 0;
     os_mutex_t mutex = 0;
     int recursionCount = 0;
     static RemoteLog *instance;
@@ -307,8 +318,8 @@ protected:
     RemoteLogTCPServer *server;
     TCPClient client;  
     int id = 0; 
-    size_t readIndex = 0;
     uint64_t recvTime = 0;
+    size_t readIndex;
     static int lastId;
 };
 
@@ -338,7 +349,7 @@ public:
     /**
      * @brief Handle a server operation
      */
-    virtual void operation(OperationCode operationCode, void *data);
+    virtual void operation(OperationCode operationCode, void *data, size_t &readIndex);
 
     /**
      * @brief Close all sessions. Frees sockets and memory.
@@ -416,7 +427,8 @@ public:
     /**
      * @brief Handle a server operation
      */
-    virtual void operation(OperationCode operationCode, void *data);
+    virtual void operation(OperationCode operationCode, void *data, size_t &readIndex);
+
 
 protected:
     IPAddress multicastAddr;
@@ -425,27 +437,81 @@ protected:
     bool wifiReady = false;
     uint8_t *buf;
     size_t bufLen;
-    size_t readIndex = 0;
 };
 
 #endif // Wiring_WiFi
 
-/**
- * @brief Structure stored in retained memory when using RemoteLogEventServer
- * 
- * If you don't have enough retained memory available you could store this in
- * regular RAM, however the RemoteLog buffer should also be stored in regular RAM.
- * If you store the RemoteLog buffer in retained memory and RemoteLogEventRetained
- * in regular memory, then historical events will be resent on reboot.
- */
-typedef struct { // 16 bytes
-    uint32_t    magic;
-    uint8_t     version;
-    uint8_t     structSize;
-    uint16_t    reserved1;
-    size_t      readIndex;
-    uint32_t    reserved2;
-} RemoteLogEventRetained;
+class RemoteLogSyslogUDP : public RemoteLogServer {
+public:
+    /**
+     * @brief Constructor
+     * 
+     * @param hostname The UDP hostname to send to.
+     * 
+     * @param port The UDP port to send to.
+     * 
+     * @param bufLen The maximum UDP packet size. Default is 256. It should not be smaller
+     * than this, because the first 128 bytes of is used as temporary storage for formatting
+     * the syslog data before the actual event date is shifted in the buffer.
+     */
+    RemoteLogSyslogUDP(const char *hostname, uint16_t port, size_t bufLen = 256);
+
+    /**
+     * @brief Destructor. 
+     * 
+     * This object is not typically deleted as you can't unregister a server, so deleting
+     * it would cause a dangling pointer.
+     */
+    virtual ~RemoteLogSyslogUDP();
+
+    /**
+     * @brief Handle a server operation
+     */
+    virtual void operation(OperationCode operationCode, void *data, size_t &readIndex);
+
+    /**
+     * @brief Sets the callback to get the device name, used in the syslog packet
+     * 
+     * @param deviceNameCallback The callback function or C++11 lambda.
+     * 
+     * The callback function or C++ lambda should have the prototype:
+     * 
+     * bool callback(String &deviceName);
+     * 
+     * The deviceName should be filled in, if known, and return true. If the device name is not yet known,
+     * then return false. This will prevent syslog messages from going out, however, so you may want to
+     * return some default value and return true instead.
+     */
+    RemoteLogSyslogUDP &withDeviceNameCallback(std::function<bool(String&)> deviceNameCallback) { this->deviceNameCallback = deviceNameCallback; return *this; };
+
+    /**
+     * @brief Sets the minimum period between UDP sends (default: 100 milliseconds)
+     * 
+     * It's possible to overload the UDP stack causing packets to be dropped. Checking the return value from
+     * UDP.sendPacket would help, however there is no good way to put the data back into the buffer after
+     * removing it. 
+     * 
+     * Adding rate limiting can also help slow down transmission if runaway recursion occurs. The value could
+     * be make even higher (1000 ms) to help protect against this on cellular devices in particular.
+     * 
+     * @param valueMs the value in milliseconds to set the sendPeriodMs to.
+     */
+    RemoteLogSyslogUDP &withMinSendPeriodMs(unsigned long valueMs) { minSendPeriodMs = valueMs; return *this; };
+
+protected:
+    unsigned long minSendPeriodMs = 100;
+    unsigned long lastSendMs = 0;
+    String hostname;
+    IPAddress remoteAddr;
+    uint16_t port;
+    std::function<bool(String&)> deviceNameCallback = 0;
+    UDP udp;
+    bool networkReady = false;
+    uint8_t *buf;
+    size_t bufLen;
+};
+
+
 
 /**
  * @brief Sends out debug logs as Particle events
@@ -461,11 +527,9 @@ public:
     /**
      * @brief Constructor
      * 
-     * @param retainedData A pointer to a RemoteLogEventRetained struct 
-     * 
      * @param eventName The event name to use for the publish
      */
-    RemoteLogEventServer(RemoteLogEventRetained *retainedData, const char *eventName);
+    RemoteLogEventServer(const char *eventName);
 
     /**
      * @brief Destructor. 
@@ -478,21 +542,20 @@ public:
     /**
      * @brief Handle a server operation
      */
-    virtual void operation(OperationCode operationCode, void *data);
+    virtual void operation(OperationCode operationCode, void *data, size_t &readIndex);
 
     static const uint32_t RETAINED_MAGIC = 0xd5a58e95;
 
 protected:
-    void stateWaitForMessage();
-    void stateTryPublish();
-    void stateFutureWait();
+    void stateWaitForMessage(size_t &readIndex);
+    void stateTryPublish(size_t &readIndex);
+    void stateFutureWait(size_t &readIndex);
 
-    RemoteLogEventRetained *retainedData;
     String eventName;
     char buf[particle::protocol::MAX_EVENT_DATA_LENGTH + 1]; // 622 bytes + null terminator
     unsigned long lastPublish = 0;
     particle::Future<bool> publishFuture;
-    std::function<void(RemoteLogEventServer&)> stateHandler = &RemoteLogEventServer::stateWaitForMessage;
+    std::function<void(RemoteLogEventServer&, size_t &readIndex)> stateHandler = &RemoteLogEventServer::stateWaitForMessage;
 };
 
 

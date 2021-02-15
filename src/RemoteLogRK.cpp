@@ -2,7 +2,7 @@
 
 RemoteLog *RemoteLog::instance;
 
-static Logger _log("loclog");
+static Logger _log("remlog");
 
 RemoteLog::RemoteLog(uint8_t *buf, size_t bufLen, LogLevel level, LogCategoryFilters filters) : StreamLogHandler(*this, level, filters), buf(buf), bufLen(bufLen) {
     // Initialize retained memory structure
@@ -28,7 +28,9 @@ RemoteLog::~RemoteLog() {
 }
 
 RemoteLog &RemoteLog::withServer(RemoteLogServer *server) {
-    servers.push_back(server);
+    if ((numServers + 1) < REMOTELOG_MAX_SERVERS) {
+        servers[numServers++] = server;
+    }
     return *this;
 }
 
@@ -54,8 +56,9 @@ void RemoteLog::loop() {
 }
 
 void RemoteLog::serverOperation(RemoteLogServer::OperationCode operationCode, void *data) {
-    for(auto it = servers.begin(); it != servers.end(); it++) {
-        (*it)->operation(operationCode, data);
+    for(size_t ii = 0; ii < numServers; ii++) {
+        RemoteLogBufHeader *hdr = getBufHeader();
+        servers[ii]->operation(operationCode, data, hdr->readIndexes[ii]);
     }
 }
 
@@ -182,7 +185,7 @@ RemoteLogTCPServer::RemoteLogTCPServer(uint16_t port, size_t maxConn) : port(por
 RemoteLogTCPServer::~RemoteLogTCPServer() {
 }
 
-void RemoteLogTCPServer::operation(OperationCode operationCode, void *data) {
+void RemoteLogTCPServer::operation(OperationCode operationCode, void *data, size_t &readIndex) {
     if (operationCode == OperationCode::LOOP) {
         if (WiFi.ready()) {
             if (!wifiReady) {
@@ -271,11 +274,6 @@ void RemoteLogTCPSession::loop() {
     if (client.connected()) {
         // Send any new data to the client
         WITH_LOCK(*RemoteLog::getInstance()) {
-            // Incrementing the refCount prevents infinitely recursive logging messages
-            // if any code here logs, while reading from the log and writing to the 
-            // TCP stream.
-            RemoteLog::getInstance()->recursionLock();
-
             uint8_t *readBuf;
             size_t readBufLen = 512;
 
@@ -285,8 +283,6 @@ void RemoteLogTCPSession::loop() {
                     readIndex += amountWritten;
                 }
             }
-
-            RemoteLog::getInstance()->recursionUnlock();
         }
 
         // Read and discard any received data
@@ -318,7 +314,7 @@ RemoteLogUDPMulticastServer::~RemoteLogUDPMulticastServer() {
     delete[] buf;
 }
 
-void RemoteLogUDPMulticastServer::operation(OperationCode operationCode, void *data) {
+void RemoteLogUDPMulticastServer::operation(OperationCode operationCode, void *data, size_t &readIndex) {
     if (operationCode == OperationCode::LOOP) {
         if (WiFi.ready()) {
             if (!wifiReady) {
@@ -329,12 +325,10 @@ void RemoteLogUDPMulticastServer::operation(OperationCode operationCode, void *d
                 wifiReady = true;
             }
 
-            RemoteLog::getInstance()->recursionLock();
             size_t dataLen = bufLen;
             if (RemoteLog::getInstance()->readLines(readIndex, buf, dataLen)) {
                 udp.sendPacket(buf, dataLen, multicastAddr, port);
             }
-            RemoteLog::getInstance()->recursionUnlock();
         }
         else {
             if (wifiReady) {
@@ -349,35 +343,190 @@ void RemoteLogUDPMulticastServer::operation(OperationCode operationCode, void *d
 
 #endif // Wiring_WiFi
 
-RemoteLogEventServer::RemoteLogEventServer(RemoteLogEventRetained *retainedData, const char *eventName) : retainedData(retainedData), eventName(eventName) {
+RemoteLogSyslogUDP::RemoteLogSyslogUDP(const char *hostname, uint16_t port, size_t bufLen) : hostname(hostname), port(port), bufLen(bufLen) {
+    buf = new uint8_t[bufLen];
+}
 
-    if (retainedData->magic != RETAINED_MAGIC ||
-        retainedData->version != 1 ||
-        retainedData->structSize != sizeof(RemoteLogEventRetained)) {
-        // Initialize retained data
-        retainedData->magic = RETAINED_MAGIC;
-        retainedData->version = 1;
-        retainedData->structSize = sizeof(RemoteLogEventRetained);
-        retainedData->reserved1 = 0;
-        retainedData->readIndex = 0;
-        retainedData->reserved2 = 0;
+RemoteLogSyslogUDP::~RemoteLogSyslogUDP() {
+    delete[] buf;
+}
+
+void RemoteLogSyslogUDP::operation(OperationCode operationCode, void *data, size_t &readIndex) {
+    if (operationCode == OperationCode::LOOP) {
+        if (Network.ready()) {
+            if (!networkReady) {
+                // Network is now up, initialize listener
+                _log.info("Network up");
+                udp.begin(0);
+
+                networkReady = true;
+            }
+
+            if (!Time.isValid()) {
+                // No timestamp yet
+                return;
+            }
+
+            if (millis() - lastSendMs < minSendPeriodMs) {
+                // Rate limiting for UDP sends
+                return;
+            }
+            lastSendMs = millis();
+            
+            if (!remoteAddr) {
+#if Wiring_WiFi
+                remoteAddr = WiFi.resolve(hostname);
+#endif
+#if Wiring_Cellular
+                remoteAddr = Cellular.resolve(hostname);
+#endif
+                // TODO: Add support for Ethernet here
+                // _log.info("sending to %s (%s) port %d", remoteAddr.toString().c_str(), hostname.c_str(), port);
+            }
+            if (!remoteAddr) {
+                // On failure to get IP address, wait 10 seconds before trying again
+                lastSendMs = millis() + 10000;
+                return;
+            }
+            
+            String deviceName = "particle";
+            if (deviceNameCallback) {
+                if (!deviceNameCallback(deviceName)) {
+                    // We don't have the device name yet, so hold off on posting log messages until we do
+                    return;
+                }
+            }
+            
+
+            if (remoteAddr) {
+                const size_t PREFIX_SIZE = 128;
+
+                char *logMsg = (char *) &buf[PREFIX_SIZE];
+                size_t logMsgLen = bufLen - PREFIX_SIZE - 1;
+
+                if (RemoteLog::getInstance()->readLines(readIndex, (unsigned char *) logMsg, logMsgLen, true)) {
+                    // Create a null terminated string
+                    logMsg[logMsgLen] = 0;
+
+                    char *cur = logMsg;
+                    char *parts[4] = {0};
+                    for(size_t ii = 0; ii < 3; ii++) {
+                        parts[ii] = strtok_r(cur, " ", &cur);
+                    }
+                    if (parts[2]) {
+                        parts[3] = cur;
+                    }
+
+                    int severity;
+                    char *category;
+                    char *preMsg;
+                    char *msg;
+                    long timeVal = Time.now();
+
+                    if (parts[3]) {
+                		// 10050398 app INFO pressure=56
+                        // parts[0] = millis timestamp
+                        // parts[1] = category
+                        // parts[2] = level
+                        // parts[3] = message
+
+                        if (strcmp(parts[2], "TRACE") == 0) {
+                            severity = 7; // Debug
+                        }
+                        else if (strcmp(parts[2], "WARN") == 0) {
+                            severity = 4; // Warning
+                        }
+                        else if (strcmp(parts[2], "ERROR") == 0) {
+                            severity = 3; // Error
+                        }
+                        else {
+                            severity = 6; // Info
+                        }
+
+                        preMsg = parts[0];
+                        category = parts[1];
+                        if (category[0] == '[') {
+                            category++;
+                            char *cp = strchr(category, ']');
+                            if (cp) {
+                                *cp = 0;
+                            }
+                        }
+                        msg = parts[3];
+
+                        unsigned long ms = strtoul(parts[0], NULL, 10);
+
+                        if (ms < millis()) {
+                            // Try to use the millis counter to make the timestamp more accurate
+                            long deltaSec = (long) (millis() - ms) / 1000; 
+                            timeVal -= deltaSec;
+                        }
+                    }
+                    else {
+                        // Just treat the whole thing as the message
+                        severity = 6; // info
+                        category = "app";
+                        preMsg = 0;
+                        msg = logMsg;                       
+                    }
+
+                    // This is mostly TIME_FORMAT_ISO8601_FULL, but replaces %z with literal Z
+                    // as Papertrail doesn't like to have a timezone. Assumption is that you
+                    // have not called Time.zone() so this will be UTC.
+                    String timeString = Time.format(timeVal, "%Y-%m-%dT%H:%M:%S");
+
+                    char *cp = (char *)buf;
+                    cp += snprintf(cp, PREFIX_SIZE, "<22>%d %s%s %s %s - - - ",
+                        severity, timeString.c_str(), "Z", deviceName.c_str(), category);
+
+                    if (preMsg) {
+                        cp += sprintf(cp, "%s ", preMsg);
+                    }
+
+                    size_t msgLen = strlen(msg);
+                    memmove(cp, msg, msgLen);
+                    cp += msgLen;
+                    *cp = 0;
+
+                    udp.sendPacket(buf, strlen((const char *)buf), remoteAddr, port);
+                }
+
+            }
+
+        }
+        else {
+            if (networkReady) {
+                // Network is now down, close existing sessions
+                _log.info("Network down");
+
+                networkReady = false;
+            }
+        }
     }
+}
+
+//
+// RemoteLogEventServer
+//
+
+RemoteLogEventServer::RemoteLogEventServer(const char *eventName) : eventName(eventName) {
+
 }
 
 RemoteLogEventServer::~RemoteLogEventServer() {
 
 }
 
-void RemoteLogEventServer::operation(OperationCode operationCode, void *data) {
+void RemoteLogEventServer::operation(OperationCode operationCode, void *data, size_t &readIndex) {
     if (operationCode == OperationCode::LOOP) {
         if (stateHandler) {
-            stateHandler(*this);
+            stateHandler(*this, readIndex);
         }
     }
 }
 
 
-void RemoteLogEventServer::stateWaitForMessage() {
+void RemoteLogEventServer::stateWaitForMessage(size_t &readIndex) {
     // Also check for connected, so we don't dequeue a message
     // if there is no connection, to minimize the risk that
     // we lose a message since buf is not retained.
@@ -385,17 +534,15 @@ void RemoteLogEventServer::stateWaitForMessage() {
         return;
     }
 
-    RemoteLog::getInstance()->recursionLock();
     size_t dataLen = sizeof(buf) - 1;
-    if (RemoteLog::getInstance()->readLines(retainedData->readIndex, (uint8_t *)buf, dataLen)) {
+    if (RemoteLog::getInstance()->readLines(readIndex, (uint8_t *)buf, dataLen)) {
         // readLines does not create a c-string so do that here
         buf[dataLen] = 0;
         stateHandler = &RemoteLogEventServer::stateTryPublish;
     }
-    RemoteLog::getInstance()->recursionUnlock();
 }
 
-void RemoteLogEventServer::stateTryPublish() {
+void RemoteLogEventServer::stateTryPublish(size_t &readIndex) {
     if (!Particle.connected() || millis() - lastPublish < 1010) {
         // Not connected or published too recently
         return;
@@ -407,7 +554,7 @@ void RemoteLogEventServer::stateTryPublish() {
     stateHandler = &RemoteLogEventServer::stateFutureWait;
 }
 
-void RemoteLogEventServer::stateFutureWait() {
+void RemoteLogEventServer::stateFutureWait(size_t &readIndex) {
     if (!publishFuture.isDone()) {
         // Publish still being attempted
         return;
