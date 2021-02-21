@@ -81,27 +81,47 @@ public:
     RemoteLogServer() {};
 
     /**
-     * @brief Base class destructor. Doesn't do anything.
+     * @brief This class is not typically deleted, because you can't unregister one
      */
     virtual ~RemoteLogServer() {};
 
     /**
-     * @brief Operations a server may perform
+     * @brief Perform setup operations
      * 
-     * The operations are differentiated by code because it makes it easy to iterate all servers
-     * and pass the appropriate OperationCode. Using a separate method ends up requiring multiple
-     * iterators, funky code, or templates.
+     * Subclasses can override this if they have tasks to perform at setup.
      */
-    enum class OperationCode {
-        SETUP,
-        LOOP,
-        RESET
-    };
+    virtual void setup() {};
 
     /**
-     * @brief Subclassed to handle server operations
+     * @brief Perform loop operations
+     * 
+     * @param readIndex The read index for this server. Not all servers use this, but for the event 
+     * server, for example, it prevents all of the events in the buffer from being resent after
+     * a reset since the readIndex parameter is preserved in retained memory.
+     * 
+     * Subclasses can override this if they have tasks to perform at loop time. This is almost common.
      */
-    virtual void operation(OperationCode code, void *data, size_t &readIndex) = 0;
+    virtual void loop(size_t &readIndex) {};
+
+    /**
+     * @brief Reset is about to occur, do things like disconnect sockets 
+     * 
+     * The TCP server uses this to disconnect the sockets, otherwise the clients won't know the
+     * server went away and will leave the window open, but never receive any more data.
+     */
+    virtual void reset() {};
+
+protected:
+    /**
+     * @brief This class is not copyable
+     */
+    RemoteLogServer(const RemoteLogServer&) = delete;
+
+    /**
+     * @brief This class is not copyable
+     */
+    RemoteLogServer& operator=(const RemoteLogServer&) = delete;
+
 };
 
 /**
@@ -166,13 +186,6 @@ public:
      */
     void loop();
 
-    /**
-     * @brief Have all servers perform an operation
-     * 
-     * Iterates the server list and sends operationCode (for example: SETUP, LOOP, or RESET) to each server.
-     */
-    void serverOperation(RemoteLogServer::OperationCode operationCode, void *data = NULL);
-
 	/**
 	 * @brief Virtual override in class Print for the StreamLogHandler to write data to the log
 	 */
@@ -232,8 +245,7 @@ public:
      * @brief Copy lines out of the buffer
      * 
      * @param readIndex Used to keep track of the point you are reading from. Set to 0 on initial
-     * call. It will be updated internally, however you must increment it by the amount you
-     * have consumed before calling again. See below.
+     * call. Unlike readNoCopy, readLines does increment readIndex.
      * 
      * @param readBuf Pointer to a buffer to copy data to.
      * 
@@ -309,11 +321,50 @@ public:
     static const uint32_t BUF_MAGIC = 0x312ad071;
 
 protected:
+    /**
+     * @brief This class is not copyable
+     */
+    RemoteLog(const RemoteLog&) = delete;
+
+    /**
+     * @brief This class is not copyable
+     */
+    RemoteLog& operator=(const RemoteLog&) = delete;
+
+    /**
+     * @brief Pointer to the buffer
+     * 
+     * Begins with a RemoteLogBufHeader and has a circular buffer of data after it
+     */
     uint8_t *buf;
+
+    /**
+     * @brief Size of the buffer, including both the RemoteLogBufHeader and the data
+     */
     size_t bufLen;
+
+    /**
+     * @brief Server object instances, added using withServer()
+     */
     RemoteLogServer *servers[REMOTELOG_MAX_SERVERS];
+
+    /**
+     * @brief Number of servers assigned
+     * 
+     * 0 = no servers, 1 = index 0 is filled in, ...
+     * 
+     * Will be at most REMOTELOG_MAX_SERVERS.
+     */
     size_t numServers = 0;
+
+    /**
+     * @brief Mutex for preventing simultaneous access to the buffer from multiple threads
+     */
     os_mutex_t mutex = 0;
+
+    /**
+     * @brief Singleton instance of this class
+     */
     static RemoteLog *instance;
 };
 
@@ -321,27 +372,79 @@ protected:
 
 class RemoteLogTCPServer; // Forward declaration
 
+/**
+ * @brief Session object - one of these for each client connected to the RemoteLogTCPServer
+ * 
+ * Lifetime is managed by RemoteLogTCPServer, you never allocate or free these objects
+ */
 class RemoteLogTCPSession {
-public:
+protected:
+    /**
+     * @brief State information for a single TCP session
+     * 
+     * @param server The server this session came from
+     * 
+     * @param client The TCPClient that the session was accepted on. 
+     */
     RemoteLogTCPSession(RemoteLogTCPServer *server, TCPClient client);
+
+    /**
+     * @brief Destructor - this object is deleted when the session is closed
+     */
     virtual ~RemoteLogTCPSession();
 
+    /**
+     * @brief Handle sending data on this session
+     */
     void loop();
 
+    /**
+     * @brief Returns true if the TCP connection is closed but this object has not been deleted yet
+     */
     bool isDone();
 
 
 protected:
+    /**
+     * @brief The RemoteLogTCPServer this session is associated with. Set in the constructor.
+     */
     RemoteLogTCPServer *server;
+
+    /**
+     * @brief The TCPClient the session is using to communicate over. Set in the constructor.
+     */
     TCPClient client;  
+
+    /**
+     * @brief A numeric id used to identify this session. Used for logging.
+     */
     int id = 0; 
+
+    /**
+     * @brief System.millis() (64-bit) time value when data was last received on this session
+     */
     uint64_t recvTime = 0;
-    size_t readIndex;
+
+    /**
+     * @brief Next location in the log buffer to read from
+     */
+    size_t readIndex = 0;
+
+    /**
+     * @brief The last id value used. Set so the first session is 1, and increases for each new session
+     */
     static int lastId;
+
+    friend class RemoteLogTCPServer;
 };
 
 /**
  * @brief Server class for sending out log messages from a TCP server (Wi-Fi only)
+ * 
+ * This is typically uses so computers on the local LAN can connect to the TCP server
+ * using nc (netcat) and see the recent logs, along with live tail.
+ * 
+ * There is no authentication! Any user on the network can connect to the device.
  */
 class RemoteLogTCPServer : public RemoteLogServer {
 public:
@@ -362,11 +465,6 @@ public:
      * it would cause a dangling pointer.
      */   
     virtual ~RemoteLogTCPServer();
-
-    /**
-     * @brief Handle a server operation
-     */
-    virtual void operation(OperationCode operationCode, void *data, size_t &readIndex);
 
     /**
      * @brief Close all sessions. Frees sockets and memory.
@@ -392,7 +490,7 @@ public:
     /**
      * @brief Sets a session timeout
      * 
-     * @param timeout Timeout as a chrono literal. You can pass in values like 30s (30 seconds) ot 5min (5 minutes).
+     * @param timeout Timeout as a chrono literal. You can pass in values like 30s (30 seconds) or 5min (5 minutes).
      * 
      * If enabled, if the other side does not send data for this long, the session will be closed. Normally, there is no 
      * need for the other side to send data, but using a session timeout can be used as a keep-alive to make sure the 
@@ -405,12 +503,48 @@ public:
      */
     unsigned long getSessionTimeout() const { return sessionTimeout; };
 
+    /**
+     * @brief Perform loop time operations such as reading and writing sockets
+     */
+    void loop(size_t &readIndex);
+
+    /**
+     * @brief Reset is about to occur, disconnect sockets 
+     */
+    virtual void reset();
+
 protected:
+    /**
+     * @brief The TCP port to listen on
+     */
     uint16_t port;
+
+    /**
+     * @brief The maximum number of simultaneous connections
+     */
     size_t maxConn;
+
+    /**
+     * @brief The Wiring TCP server (listener) object
+     */
     TCPServer server;
+
+    /**
+     * @brief Vector of sessions, one per active connection
+     */
     std::vector<RemoteLogTCPSession *>sessions;
+
+    /**
+     * @brief How long to wait before timing out sessions (0 = never). See withSessionTimeout().
+     */
     unsigned long sessionTimeout = 0;
+
+    /**
+     * @brief Set to true when WiFi.ready() is true
+     * 
+     * The TCP server is bound only after WiFi.ready() is true, and is
+     * reinitialized after WiFi goes down.
+     */
     bool wifiReady = false;
 };
 
@@ -442,22 +576,56 @@ public:
     virtual ~RemoteLogUDPMulticastServer();
 
     /**
-     * @brief Handle a server operation
+     * @brief Perform loop time operations such as reading and writing sockets
      */
-    virtual void operation(OperationCode operationCode, void *data, size_t &readIndex);
+    void loop(size_t &readIndex);
 
 
 protected:
+    /**
+     * @brief The multicast address to send to
+     * 
+     * Note that this must be a specific multicast IP address 224.0.0.0 to 239.255.255.255, not
+     * a regular local IP address.
+     */
     IPAddress multicastAddr;
+
+    /**
+     * @brief The UDP port to send to.
+     */
     uint16_t port;
+
+    /**
+     * @brief The Wiring UDP object used to send UDP data
+     */
     UDP udp;
+
+    /**
+     * @brief Set to true when WiFi.ready() is true
+     * 
+     * The UDP object is bound using UDP.begin() only after WiFi.ready() is true, and is
+     * reinitialized after WiFi goes down.
+     */
     bool wifiReady = false;
+
+    /**
+     * @brief The packet buffer. Allocated in the constructor.
+     */
     uint8_t *buf;
+
+    /**
+     * @brief The size of the packet buffer. Set in the constructor.
+     */
     size_t bufLen;
 };
 
 #endif // Wiring_WiFi
 
+/**
+ * @brief Log server module for writing to a syslog server over UDP
+ * 
+ * The syslog server can be on your local network, or cloud-hosted, like Solarwinds Papertrail.
+ */
 class RemoteLogSyslogUDP : public RemoteLogServer {
 public:
     /**
@@ -502,11 +670,6 @@ public:
     RemoteLogSyslogUDP &withHostnameAndPort(const char *hostname, uint16_t port);
 
     /**
-     * @brief Handle a server operation
-     */
-    virtual void operation(OperationCode operationCode, void *data, size_t &readIndex);
-
-    /**
      * @brief Sets the callback to get the device name, used in the syslog packet
      * 
      * @param deviceNameCallback The callback function or C++11 lambda.
@@ -535,16 +698,67 @@ public:
      */
     RemoteLogSyslogUDP &withMinSendPeriodMs(unsigned long valueMs) { minSendPeriodMs = valueMs; return *this; };
 
+    /**
+     * @brief Perform loop time operations such as reading and writing sockets
+     */
+    void loop(size_t &readIndex);
+
 protected:
+    /**
+     * @brief UDP send rate limit (milliseconds)
+     * 
+     * This is a safety net to avoid sending data too quickly. Since UDP data is not acknowledged, there's no
+     * way to know if it's been discarded. This can be set to 0 for no rate limiting.
+     */
     unsigned long minSendPeriodMs = 100;
+
+    /**
+     * @brief The millis value of the last send used for rate limiting
+     */
     unsigned long lastSendMs = 0;
+
+    /**
+     * @brief The hostname to send to 
+     * 
+     * This is resolved by DNS once at startup, then the cached address is used. If you specify
+     * a dotted decimal IPv4 address in hostname (10.1.2.3, for example), it's parsed directly
+     * without network access.
+     */
     String hostname;
+
+    /**
+     * @brief The IPv4 address of the remote host
+     */
     IPAddress remoteAddr;
+
+    /**
+     * @brief The UDP port to send to
+     */
     uint16_t port = 0;
+
+    /**
+     * @brief The function to call to find the name of this device set using withDeviceNameCallback
+     */
     std::function<bool(String&)> deviceNameCallback = 0;
+
+    /**
+     * @brief The Wiring UDP object used to send UDP data
+     */
     UDP udp;
+
+    /**
+     * @brief true if Celluar.ready() or WiFi.ready() is true
+     */
     bool networkReady = false;
+
+    /**
+     * @brief The packet buffer. Allocated in the constructor.
+     */
     uint8_t *buf;
+
+    /**
+     * @brief The size of the packet buffer. Set in the constructor.
+     */
     size_t bufLen;
 };
 
@@ -577,21 +791,68 @@ public:
     virtual ~RemoteLogEventServer();
 
     /**
-     * @brief Handle a server operation
+     * @brief Perform loop time operations such as reading and writing sockets
+     * 
+     * Calls the state handler in stateHandler.
      */
-    virtual void operation(OperationCode operationCode, void *data, size_t &readIndex);
-
-    static const uint32_t RETAINED_MAGIC = 0xd5a58e95;
+    void loop(size_t &readIndex);
 
 protected:
+    /**
+     * @brief State handler to wait for cloud connected and messages to send. Called from loop().
+     * 
+     * If cloud connected and there is a message, the message is consumed and copied into buf.
+     * 
+     * Next state: stateTryPublish
+     */
     void stateWaitForMessage(size_t &readIndex);
+
+    /** 
+     * @brief If still connected to the cloud and it has been at least 1010 milliseconds, publish
+     * 
+     * The publish is non-blocking using a future.
+     * 
+     * Previous state: stateWaitForMessage
+     * Next state: stateFutureWait
+     */
     void stateTryPublish(size_t &readIndex);
+
+    /**
+     * @brief Wait for the publish to succeed or fail
+     * 
+     * Next state: stateWaitForMessage (success)
+     *   or stateTryPublish (failure)
+     */
     void stateFutureWait(size_t &readIndex);
 
+    /**
+     * @brief The event name to publish, passed to the constructor
+     */
     String eventName;
+
+    /**
+     * @brief Buffer to hold the event to be published
+     * 
+     * It's copied into a buffer because otherwise it would need to lock the main circular buffer
+     * during the entire publish operation, which would take way too long.
+     */
     char buf[particle::protocol::MAX_EVENT_DATA_LENGTH + 1]; // 622 bytes + null terminator
+
+    /**
+     * @brief The millis() counter at the time of the last publish
+     * 
+     * This is used to prevent publishing more than once every 1010 milliseconds.
+     */
     unsigned long lastPublish = 0;
+
+    /**
+     * @brief The Future used to determine if the publish has completed yet
+     */
     particle::Future<bool> publishFuture;
+
+    /**
+     * @brief State handler, called from loop
+     */
     std::function<void(RemoteLogEventServer&, size_t &readIndex)> stateHandler = &RemoteLogEventServer::stateWaitForMessage;
 };
 

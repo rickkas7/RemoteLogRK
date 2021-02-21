@@ -41,7 +41,9 @@ void RemoteLog::setup() {
     os_mutex_create(&mutex);
 
     // Call setup operation for registered servers (added using withServer())
-    serverOperation(RemoteLogServer::OperationCode::SETUP);
+    for(size_t ii = 0; ii < numServers; ii++) {
+        servers[ii]->setup();
+    }
 
 	// Add this handler into the system log manager
 	LogManager::instance()->addHandler(this);
@@ -52,13 +54,9 @@ void RemoteLog::setup() {
 }
 
 void RemoteLog::loop() {
-    serverOperation(RemoteLogServer::OperationCode::LOOP);
-}
-
-void RemoteLog::serverOperation(RemoteLogServer::OperationCode operationCode, void *data) {
     for(size_t ii = 0; ii < numServers; ii++) {
         RemoteLogBufHeader *hdr = getBufHeader();
-        servers[ii]->operation(operationCode, data, hdr->readIndexes[ii]);
+        servers[ii]->loop(hdr->readIndexes[ii]);
     }
 }
 
@@ -163,7 +161,9 @@ size_t RemoteLog::write(uint8_t c) {
 
 void RemoteLog::systemEventHandler(system_event_t event, int data, void* moreData) {
     if (event == reset) {
-        serverOperation(RemoteLogServer::OperationCode::RESET);
+        for(size_t ii = 0; ii < numServers; ii++) {
+            servers[ii]->reset();
+        }
     }
 }
 
@@ -181,67 +181,66 @@ RemoteLogTCPServer::RemoteLogTCPServer(uint16_t port, size_t maxConn) : port(por
 RemoteLogTCPServer::~RemoteLogTCPServer() {
 }
 
-void RemoteLogTCPServer::operation(OperationCode operationCode, void *data, size_t &readIndex) {
-    if (operationCode == OperationCode::LOOP) {
-        if (WiFi.ready()) {
-            if (!wifiReady) {
-                // Wi-Fi is now up, initialize listener
-                // _log.info("Wi-Fi up");
-                server.begin();
+void RemoteLogTCPServer::loop(size_t &readIndex) {
+    if (WiFi.ready()) {
+        if (!wifiReady) {
+            // Wi-Fi is now up, initialize listener
+            // _log.info("Wi-Fi up");
+            server.begin();
 
-                wifiReady = true;
-            }
+            wifiReady = true;
+        }
 
-            // Handle new sessions
-            TCPClient newClient = server.available();
-            if (newClient.connected()) {
-                // Connection established
-                if (sessions.size() < maxConn) {
-                    RemoteLogTCPSession *sess = new RemoteLogTCPSession(this, newClient);
-                    if (sess) {
-                        sessions.push_back(sess);
-                    }
-                    else {
-                        // Out of memory, drop connection
-                        newClient.stop();    
-                    }
+        // Handle new sessions
+        TCPClient newClient = server.available();
+        if (newClient.connected()) {
+            // Connection established
+            if (sessions.size() < maxConn) {
+                RemoteLogTCPSession *sess = new RemoteLogTCPSession(this, newClient);
+                if (sess) {
+                    sessions.push_back(sess);
                 }
                 else {
-                    // Server busy, drop this connection
-                    newClient.stop();
+                    // Out of memory, drop connection
+                    newClient.stop();    
                 }
             }
-
-            // Clean up sessions
-            for(auto it = sessions.begin(); it != sessions.end(); ) {
-                RemoteLogTCPSession *sess = *it;
-                if (sess->isDone()) {
-                    it = sessions.erase(it);
-                    delete sess;
-                }
-                else {
-                    it++;
-                }
-            }
-
-            // Handle existing sessions
-            for(auto it = sessions.begin(); it != sessions.end(); it++) {
-                (*it)->loop();
+            else {
+                // Server busy, drop this connection
+                newClient.stop();
             }
         }
-        else {
-            if (wifiReady) {
-                // Wi-Fi is now down, close existing sessions
-                // _log.info("Wi-Fi down");
-                closeSessions();
 
-                wifiReady = false;
+        // Clean up sessions
+        for(auto it = sessions.begin(); it != sessions.end(); ) {
+            RemoteLogTCPSession *sess = *it;
+            if (sess->isDone()) {
+                it = sessions.erase(it);
+                delete sess;
             }
+            else {
+                it++;
+            }
+        }
+
+        // Handle existing sessions
+        for(auto it = sessions.begin(); it != sessions.end(); it++) {
+            (*it)->loop();
         }
     }
-    else if (operationCode == OperationCode::RESET) {
-        closeSessions();
-    }   
+    else {
+        if (wifiReady) {
+            // Wi-Fi is now down, close existing sessions
+            // _log.info("Wi-Fi down");
+            closeSessions();
+
+            wifiReady = false;
+        }
+    }
+}
+
+void RemoteLogTCPServer::reset() {
+    closeSessions();
 }
 
 void RemoteLogTCPServer::closeSessions() {
@@ -310,37 +309,39 @@ RemoteLogUDPMulticastServer::~RemoteLogUDPMulticastServer() {
     delete[] buf;
 }
 
-void RemoteLogUDPMulticastServer::operation(OperationCode operationCode, void *data, size_t &readIndex) {
-    if (operationCode == OperationCode::LOOP) {
-        if (WiFi.ready()) {
-            if (!wifiReady) {
-                // Wi-Fi is now up, initialize listener
-                _log.info("Wi-Fi up");
-                udp.begin(0);
+void RemoteLogUDPMulticastServer::loop(size_t &readIndex) {
+    if (WiFi.ready()) {
+        if (!wifiReady) {
+            // Wi-Fi is now up, initialize listener
+            _log.info("Wi-Fi up");
+            udp.begin(0);
 
-                wifiReady = true;
-            }
-
-            size_t dataLen = bufLen;
-            if (RemoteLog::getInstance()->readLines(readIndex, buf, dataLen)) {
-                udp.sendPacket(buf, dataLen, multicastAddr, port);
-            }
+            wifiReady = true;
         }
-        else {
-            if (wifiReady) {
-                // Wi-Fi is now down, close existing sessions
-                _log.info("Wi-Fi down");
 
-                wifiReady = false;
-            }
+        size_t dataLen = bufLen;
+        if (RemoteLog::getInstance()->readLines(readIndex, buf, dataLen)) {
+            udp.sendPacket(buf, dataLen, multicastAddr, port);
         }
     }
+    else {
+        if (wifiReady) {
+            // Wi-Fi is now down, close existing sessions
+            _log.info("Wi-Fi down");
+
+            wifiReady = false;
+        }
+    }
+
 }
 
 #endif // Wiring_WiFi
 
 RemoteLogSyslogUDP::RemoteLogSyslogUDP(const char *hostname, uint16_t port, size_t bufLen) : hostname(hostname), port(port), bufLen(bufLen) {
     buf = new uint8_t[bufLen];
+    if (buf) {
+        buf[0] = 0;
+    }
 }
 
 RemoteLogSyslogUDP::~RemoteLogSyslogUDP() {
@@ -354,34 +355,39 @@ RemoteLogSyslogUDP &RemoteLogSyslogUDP::withHostnameAndPort(const char *hostname
     return *this;
 }
 
-void RemoteLogSyslogUDP::operation(OperationCode operationCode, void *data, size_t &readIndex) {
-    if (operationCode == OperationCode::LOOP) {
-        if (Network.ready()) {
-            if (!networkReady) {
-                // Network is now up, initialize listener
-                _log.info("Network up");
-                udp.begin(0);
+void RemoteLogSyslogUDP::loop(size_t &readIndex) {
+    if (Network.ready()) {
+        if (!networkReady) {
+            // Network is now up, initialize listener
+            _log.info("Network up");
+            udp.begin(0);
 
-                networkReady = true;
-            }
+            networkReady = true;
+        }
 
-            if (!Time.isValid()) {
-                // No timestamp yet
-                return;
-            }
+        if (!Time.isValid()) {
+            // No timestamp yet
+            return;
+        }
 
-            if (hostname.length() == 0 || port == 0) {
-                // Not configured yet
-                return;
-            }
+        if (hostname.length() == 0 || port == 0) {
+            // Not configured yet
+            return;
+        }
 
-            if (millis() - lastSendMs < minSendPeriodMs) {
-                // Rate limiting for UDP sends
-                return;
+        if (millis() - lastSendMs < minSendPeriodMs) {
+            // Rate limiting for UDP sends
+            return;
+        }
+        lastSendMs = millis();
+        
+        if (!remoteAddr) {
+            int a[4];
+            if (sscanf(hostname.c_str(), "%u.%u.%u.%u", &a[0], &a[1], &a[2], &a[3]) == 4) {
+                // The hostname is a string IP address
+                remoteAddr = IPAddress(a[0], a[1], a[2], a[3]);
             }
-            lastSendMs = millis();
-            
-            if (!remoteAddr) {
+            else {
 #if Wiring_WiFi
                 remoteAddr = WiFi.resolve(hostname);
 #endif
@@ -389,128 +395,140 @@ void RemoteLogSyslogUDP::operation(OperationCode operationCode, void *data, size
                 remoteAddr = Cellular.resolve(hostname);
 #endif
                 // TODO: Add support for Ethernet here
-                // _log.info("sending to %s (%s) port %d", remoteAddr.toString().c_str(), hostname.c_str(), port);
             }
-            if (!remoteAddr) {
-                // On failure to get IP address, wait 10 seconds before trying again
-                lastSendMs = millis() + 10000;
+            // _log.info("sending to %s (%s) port %d", remoteAddr.toString().c_str(), hostname.c_str(), port);
+        }
+        if (!remoteAddr) {
+            // On failure to get IP address, wait 10 seconds before trying again
+            lastSendMs = millis() + 10000;
+            return;
+        }
+        
+        String deviceName = "particle";
+        if (deviceNameCallback) {
+            if (!deviceNameCallback(deviceName)) {
+                // We don't have the device name yet, so hold off on posting log messages until we do
                 return;
             }
-            
-            String deviceName = "particle";
-            if (deviceNameCallback) {
-                if (!deviceNameCallback(deviceName)) {
-                    // We don't have the device name yet, so hold off on posting log messages until we do
-                    return;
-                }
+        }
+        
+        if (remoteAddr && buf[0]) {
+            // There was a saved buffer that was not previously sent
+            int count = udp.sendPacket(buf, strlen((const char *)buf), remoteAddr, port);
+            if (count > 0) {
+                // We successfully sent the buffer, get a new line next time
+                buf[0] = 0;
             }
-            
+            return;
+        }
 
-            if (remoteAddr) {
-                const size_t PREFIX_SIZE = 128;
+        if (remoteAddr) {
+            const size_t PREFIX_SIZE = 128;
 
-                char *logMsg = (char *) &buf[PREFIX_SIZE];
-                size_t logMsgLen = bufLen - PREFIX_SIZE - 1;
+            char *logMsg = (char *) &buf[PREFIX_SIZE];
+            size_t logMsgLen = bufLen - PREFIX_SIZE - 1;
 
-                if (RemoteLog::getInstance()->readLines(readIndex, (unsigned char *) logMsg, logMsgLen, true)) {
-                    // Create a null terminated string
-                    logMsg[logMsgLen] = 0;
+            if (RemoteLog::getInstance()->readLines(readIndex, (unsigned char *) logMsg, logMsgLen, true)) {
+                // Create a null terminated string
+                logMsg[logMsgLen] = 0;
 
-                    char *cur = logMsg;
-                    char *parts[4] = {0};
-                    for(size_t ii = 0; ii < 3; ii++) {
-                        parts[ii] = strtok_r(cur, " ", &cur);
+                char *cur = logMsg;
+                char *parts[4] = {0};
+                for(size_t ii = 0; ii < 3; ii++) {
+                    parts[ii] = strtok_r(cur, " ", &cur);
+                }
+                if (parts[2]) {
+                    parts[3] = cur;
+                }
+
+                int severity;
+                const char *category;
+                char *preMsg;
+                char *msg;
+                long timeVal = Time.now();
+
+                if (parts[3]) {
+                    // 10050398 app INFO pressure=56
+                    // parts[0] = millis timestamp
+                    // parts[1] = category
+                    // parts[2] = level
+                    // parts[3] = message
+
+                    if (strcmp(parts[2], "TRACE") == 0) {
+                        severity = 7; // Debug
                     }
-                    if (parts[2]) {
-                        parts[3] = cur;
+                    else if (strcmp(parts[2], "WARN") == 0) {
+                        severity = 4; // Warning
                     }
-
-                    int severity;
-                    const char *category;
-                    char *preMsg;
-                    char *msg;
-                    long timeVal = Time.now();
-
-                    if (parts[3]) {
-                		// 10050398 app INFO pressure=56
-                        // parts[0] = millis timestamp
-                        // parts[1] = category
-                        // parts[2] = level
-                        // parts[3] = message
-
-                        if (strcmp(parts[2], "TRACE") == 0) {
-                            severity = 7; // Debug
-                        }
-                        else if (strcmp(parts[2], "WARN") == 0) {
-                            severity = 4; // Warning
-                        }
-                        else if (strcmp(parts[2], "ERROR") == 0) {
-                            severity = 3; // Error
-                        }
-                        else {
-                            severity = 6; // Info
-                        }
-
-                        preMsg = parts[0];
-                        category = parts[1];
-                        if (category[0] == '[') {
-                            category++;
-                            char *cp = strchr(category, ']');
-                            if (cp) {
-                                *cp = 0;
-                            }
-                        }
-                        msg = parts[3];
-
-                        unsigned long ms = strtoul(parts[0], NULL, 10);
-
-                        if (ms < millis()) {
-                            // Try to use the millis counter to make the timestamp more accurate
-                            long deltaSec = (long) (millis() - ms) / 1000; 
-                            timeVal -= deltaSec;
-                        }
+                    else if (strcmp(parts[2], "ERROR") == 0) {
+                        severity = 3; // Error
                     }
                     else {
-                        // Just treat the whole thing as the message
-                        severity = 6; // info
-                        category = "app";
-                        preMsg = 0;
-                        msg = logMsg;                       
+                        severity = 6; // Info
                     }
 
-                    // This is mostly TIME_FORMAT_ISO8601_FULL, but replaces %z with literal Z
-                    // as Papertrail doesn't like to have a timezone. Assumption is that you
-                    // have not called Time.zone() so this will be UTC.
-                    String timeString = Time.format(timeVal, "%Y-%m-%dT%H:%M:%S");
-
-                    char *cp = (char *)buf;
-                    cp += snprintf(cp, PREFIX_SIZE, "<22>%d %s%s %s %s - - - ",
-                        severity, timeString.c_str(), "Z", deviceName.c_str(), category);
-
-                    if (preMsg) {
-                        cp += sprintf(cp, "%s ", preMsg);
+                    preMsg = parts[0];
+                    category = parts[1];
+                    if (category[0] == '[') {
+                        category++;
+                        char *cp = strchr(category, ']');
+                        if (cp) {
+                            *cp = 0;
+                        }
                     }
+                    msg = parts[3];
 
-                    size_t msgLen = strlen(msg);
-                    memmove(cp, msg, msgLen);
-                    cp += msgLen;
-                    *cp = 0;
+                    unsigned long ms = strtoul(parts[0], NULL, 10);
 
-                    udp.sendPacket(buf, strlen((const char *)buf), remoteAddr, port);
+                    if (ms < millis()) {
+                        // Try to use the millis counter to make the timestamp more accurate
+                        long deltaSec = (long) (millis() - ms) / 1000; 
+                        timeVal -= deltaSec;
+                    }
+                }
+                else {
+                    // Just treat the whole thing as the message
+                    severity = 6; // info
+                    category = "app";
+                    preMsg = 0;
+                    msg = logMsg;                       
                 }
 
-            }
+                // This is mostly TIME_FORMAT_ISO8601_FULL, but replaces %z with literal Z
+                // as Papertrail doesn't like to have a timezone. Assumption is that you
+                // have not called Time.zone() so this will be UTC.
+                String timeString = Time.format(timeVal, "%Y-%m-%dT%H:%M:%S");
 
-        }
-        else {
-            if (networkReady) {
-                // Network is now down, close existing sessions
-                _log.info("Network down");
+                char *cp = (char *)buf;
+                cp += snprintf(cp, PREFIX_SIZE, "<22>%d %s%s %s %s - - - ",
+                    severity, timeString.c_str(), "Z", deviceName.c_str(), category);
 
-                networkReady = false;
+                if (preMsg) {
+                    cp += sprintf(cp, "%s ", preMsg);
+                }
+
+                size_t msgLen = strlen(msg);
+                memmove(cp, msg, msgLen);
+                cp += msgLen;
+                *cp = 0;
+
+                int count = udp.sendPacket(buf, strlen((const char *)buf), remoteAddr, port);
+                if (count > 0) {
+                    // We successfully sent the buffer, get a new line next time
+                    buf[0] = 0;
+                }
             }
         }
     }
+    else {
+        if (networkReady) {
+            // Network is now down, close existing sessions
+            _log.info("Network down");
+
+            networkReady = false;
+        }
+    }
+
 }
 
 //
@@ -525,11 +543,9 @@ RemoteLogEventServer::~RemoteLogEventServer() {
 
 }
 
-void RemoteLogEventServer::operation(OperationCode operationCode, void *data, size_t &readIndex) {
-    if (operationCode == OperationCode::LOOP) {
-        if (stateHandler) {
-            stateHandler(*this, readIndex);
-        }
+void RemoteLogEventServer::loop(size_t &readIndex) {
+    if (stateHandler) {
+        stateHandler(*this, readIndex);
     }
 }
 
