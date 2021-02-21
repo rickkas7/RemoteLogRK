@@ -15,10 +15,10 @@ socket.on("listening", function() {
 socket.on("message", function(msg, rinfo) {
     console.log('> ' + rinfo.address + ':' + rinfo.port);
 
-    str = msg.toString();
-    if (str.length > 0 && str.substr(str.length - 1) == '\n') {
-        str = str.substr(0, str.length - 1);
-    }
-
-    console.log(str);
+    msg.toString().split('\n').forEach(function(line) {
+        line = line.trim();
+        if (line.length > 0) {
+            console.log(line);
+        }
+    });
 });

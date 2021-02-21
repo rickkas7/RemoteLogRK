@@ -29,7 +29,7 @@ void loop() {
         static unsigned long lastLog = 0;
         static int counter = 0;
 
-        if (millis() - lastLog >= 1000) {
+        if (millis() - lastLog >= 5000) {
             lastLog = millis();
             Log.info("counter=%d memory=%u", ++counter, System.freeMemory());
         }

@@ -1,7 +1,8 @@
 #ifndef __REMOTELOGRK_H
 #define __REMOTELOGRK_H
 
-// Repository: 
+// Repository: https://github.com/rickkas7/RemoteLogRK
+// License: MIT
 
 #include "Particle.h"
 
@@ -11,7 +12,7 @@
 /**
  * @brief The maximum number of servers you can add using withServer
  * 
- * Be careful modifying this, see RemoteLogBufferHeader
+ * Be careful modifying as ot changes the size of size of RemoteLogBufferHeader.
  */
 const size_t REMOTELOG_MAX_SERVERS = 4;
 
@@ -26,12 +27,45 @@ const size_t REMOTELOG_MAX_SERVERS = 4;
  * as the headerSize member is a uint8_t. It's currently 32 bytes.
  */
 typedef struct { // 32 bytes
+    /**
+     * @brief magic bytes, RemoteLog::BUF_MAGIC = 0x312ad071
+     */
     uint32_t    magic;
+
+    /**
+     * @brief version is 1
+     */
     uint8_t     version;
+
+    /**
+     * @brief sizeof(RemoteLogBufHeader), currently 32. Limited to 255 because of uint8_t
+     */
     uint8_t     headerSize;
+
+    /**
+     * @brief Total size of buffer including RemoteLogBufHeader and data.
+     */
     uint16_t    bufLen;
+
+    /**
+     * @brief Index into data buffer to write to next. 
+     * 
+     * This can be larger than the buffer size as it is always taken modulo buffer size. This happens when the
+     * buffer wraps around to the beginning.
+     */
     size_t      writeIndex;
+
+    /**
+     * @brief Index into data buffer to read from for each server. 
+     * 
+     * This can be larger than the buffer size as it is always taken modulo buffer size. This happens when the
+     * buffer wraps around to the beginning.
+     */
     size_t      readIndexes[REMOTELOG_MAX_SERVERS];
+
+    /**
+     * @brief Reserved for future use, currently always 0.
+     */
     uint32_t    reserved;
     // Data goes here
 } RemoteLogBufHeader;
@@ -244,22 +278,6 @@ public:
     void unlock() { os_mutex_unlock(mutex); };
 
     /**
-     * @brief Prevents saving logging data in the circular buffer
-     * 
-     * This is done to make sure that if any code generates a log message while you are
-     * trying to output a log message from the server, it's ignored. Otherwise, you could
-     * get into an infinite recursion of log messages. Usually you recursionLock() right
-     * before readNoCopy() or readLines() and recursionUnlock() after you've written the
-     * data.
-     */
-    void recursionLock() { recursionCount++; };
-
-    /**
-     * @brief Releases the lock from recursionLock()
-     */
-    void recursionUnlock() { recursionCount--; };
-
-    /**
      * @brief System event handler callback
      * 
      * The RemoteLog registers for reset events and passes them to servers. This is used
@@ -296,7 +314,6 @@ protected:
     RemoteLogServer *servers[REMOTELOG_MAX_SERVERS];
     size_t numServers = 0;
     os_mutex_t mutex = 0;
-    int recursionCount = 0;
     static RemoteLog *instance;
 };
 
@@ -446,6 +463,17 @@ public:
     /**
      * @brief Constructor
      * 
+     * @param bufLen The maximum UDP packet size. Default is 256. It should not be smaller
+     * than this, because the first 128 bytes of is used as temporary storage for formatting
+     * the syslog data before the actual event date is shifted in the buffer.
+     * 
+     * If you use this constructor you must set the hostname and port using 
+     */
+    RemoteLogSyslogUDP(size_t bufLen = 256);
+
+    /**
+     * @brief Constructor
+     * 
      * @param hostname The UDP hostname to send to.
      * 
      * @param port The UDP port to send to.
@@ -463,6 +491,15 @@ public:
      * it would cause a dangling pointer.
      */
     virtual ~RemoteLogSyslogUDP();
+
+    /**
+     * @brief Sets the hostname and port of the UDP syslog server
+     * 
+     * @param hostname The UDP hostname to send to.
+     * 
+     * @param port The UDP port to send to.
+     */
+    RemoteLogSyslogUDP &withHostnameAndPort(const char *hostname, uint16_t port);
 
     /**
      * @brief Handle a server operation
@@ -503,7 +540,7 @@ protected:
     unsigned long lastSendMs = 0;
     String hostname;
     IPAddress remoteAddr;
-    uint16_t port;
+    uint16_t port = 0;
     std::function<bool(String&)> deviceNameCallback = 0;
     UDP udp;
     bool networkReady = false;

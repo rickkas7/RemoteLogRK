@@ -3,3 +3,4 @@ target
 .vscode
 *.bin
 lib
+node_modules

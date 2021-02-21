@@ -154,13 +154,9 @@ bool RemoteLog::readLines(size_t &readIndex, uint8_t *readBuf, size_t &readBufLe
 
 
 size_t RemoteLog::write(uint8_t c) {
-    if (recursionCount == 0) {
-        // Be sure to not add any logging commands in this block, as it could lead
-        // to infinite recursion.
-        WITH_LOCK(*this) {
-            getBufData()[getBufHeader()->writeIndex++ % getBufDataLen()] = c;
-        } 
-    }
+    WITH_LOCK(*this) {
+        getBufData()[getBufHeader()->writeIndex++ % getBufDataLen()] = c;
+    } 
 
     return 1;
 }
@@ -351,6 +347,13 @@ RemoteLogSyslogUDP::~RemoteLogSyslogUDP() {
     delete[] buf;
 }
 
+RemoteLogSyslogUDP &RemoteLogSyslogUDP::withHostnameAndPort(const char *hostname, uint16_t port) {
+    this->hostname = hostname;
+    this->port = port;
+    this->remoteAddr = IPAddress();
+    return *this;
+}
+
 void RemoteLogSyslogUDP::operation(OperationCode operationCode, void *data, size_t &readIndex) {
     if (operationCode == OperationCode::LOOP) {
         if (Network.ready()) {
@@ -364,6 +367,11 @@ void RemoteLogSyslogUDP::operation(OperationCode operationCode, void *data, size
 
             if (!Time.isValid()) {
                 // No timestamp yet
+                return;
+            }
+
+            if (hostname.length() == 0 || port == 0) {
+                // Not configured yet
                 return;
             }
 
@@ -418,7 +426,7 @@ void RemoteLogSyslogUDP::operation(OperationCode operationCode, void *data, size
                     }
 
                     int severity;
-                    char *category;
+                    const char *category;
                     char *preMsg;
                     char *msg;
                     long timeVal = Time.now();
