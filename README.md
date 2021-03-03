@@ -3,7 +3,10 @@
 *Remote logging for Particle devices*
 
 - Repository: https://github.com/rickkas7/RemoteLogRK
-- License: MIT
+- [Full browsable API](https://rickkas7.github.io/RemoteLogRK/index.html)
+- License: MIT (can be used in open or closed-source projects, including commercial projects, with no attribution required)
+- Library: RemoteLogRK
+
 
 This library provides several mechanisms for getting debugging logs (Log.info, Log.error, etc.) off the device:
 
@@ -37,7 +40,16 @@ The advantage of events is that they are secure and take advantage of the Partic
 
 ### Multicast UDP
 
-The Multicast UDP option is available for Wi-Fi devices.
+The Multicast UDP option is available for Wi-Fi devices. 
+
+Pros:
+- Small code
+- Efficient
+- Does not require a server with a fixed IP address
+
+Cons:
+- Not authenticated or encrypted
+- Anyone on the LAN can monitor all logs in real time
 
 
 ### TCP server
@@ -48,6 +60,11 @@ The disadvantage is that the transport is not encrypted, there is no authenticat
 
 
 ## Version History
+
+### 0.0.3
+
+- Documentation
+- Added ability to set syslog host and port after construction
 
 ### 0.0.2 (2021-02-15)
 

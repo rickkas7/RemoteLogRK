@@ -68,7 +68,9 @@ $(function() {
 <div class="textblock"><p><em>Remote logging for Particle devices</em></p>
 <ul>
 <li>Repository: <a href="https://github.com/rickkas7/RemoteLogRK">https://github.com/rickkas7/RemoteLogRK</a></li>
-<li>License: MIT</li>
+<li><a href="https://rickkas7.github.io/RemoteLogRK/index.html">Full browsable API</a></li>
+<li>License: MIT (can be used in open or closed-source projects, including commercial projects, with no attribution required)</li>
+<li>Library: RemoteLogRK</li>
 </ul>
 <p>This library provides several mechanisms for getting debugging logs (Log.info, Log.error, etc.) off the device:</p>
 <ul>
@@ -90,10 +92,24 @@ $(function() {
 <p>The advantage of events is that they are secure and take advantage of the Particle cloud encryption layer so there is little extra code or handshaking required. And event-based logging works on both cellular and Wi-Fi.</p>
 <h2>Multicast UDP</h2>
 <p>The Multicast UDP option is available for Wi-Fi devices.</p>
+<p>Pros:</p><ul>
+<li>Small code</li>
+<li>Efficient</li>
+<li>Does not require a server with a fixed IP address</li>
+</ul>
+<p>Cons:</p><ul>
+<li>Not authenticated or encrypted</li>
+<li>Anyone on the LAN can monitor all logs in real time</li>
+</ul>
 <h2>TCP server</h2>
 <p>The TCP server option is available for Wi-Fi devices. It works the opposite of the other logging methods. The recent logs are accumulated locally, and when you connect to the TCP server the recent logs are returned, then the connection has a live tail of new logging entries. This is useful if you don't normally care about the logs, but if there's a problem you want to be able to connect to the device over the local LAN.</p>
 <p>The disadvantage is that the transport is not encrypted, there is no authentication to connect to the server, and when using DHCP it's hard to know the IP address of the device you want to connect to. But it may be useful in some cases.</p>
 <h1>Version History</h1>
+<h2>0.0.3</h2>
+<ul>
+<li>Documentation</li>
+<li>Added ability to set syslog host and port after construction</li>
+</ul>
 <h2>0.0.2 (2021-02-15)</h2>
 <ul>
 <li>Added Papertrail (syslog UDP) logging</li>

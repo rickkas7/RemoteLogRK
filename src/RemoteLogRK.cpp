@@ -337,6 +337,13 @@ void RemoteLogUDPMulticastServer::loop(size_t &readIndex) {
 
 #endif // Wiring_WiFi
 
+RemoteLogSyslogUDP::RemoteLogSyslogUDP(size_t bufLen) : bufLen(bufLen) {
+    buf = new uint8_t[bufLen];
+    if (buf) {
+        buf[0] = 0;
+    }
+}
+
 RemoteLogSyslogUDP::RemoteLogSyslogUDP(const char *hostname, uint16_t port, size_t bufLen) : hostname(hostname), port(port), bufLen(bufLen) {
     buf = new uint8_t[bufLen];
     if (buf) {
