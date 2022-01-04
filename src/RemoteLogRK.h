@@ -265,6 +265,42 @@ public:
      */
     bool readLines(size_t &readIndex, uint8_t *readBuf, size_t &readBufLen, bool oneLine = false);
 
+
+    /**
+     * @brief Works like readLines, but only returns a single line and has a filter function
+     * 
+     * @param readIndex Used to keep track of the point you are reading from. Set to 0 on initial
+     * call. Unlike readNoCopy, readLines does increment readIndex.
+     * 
+     * @param readBuf Pointer to a buffer to copy data to.
+     * 
+     * @param readBufLen On input, the maximum number of bytes you want. On output, the
+     * number of bytes copied.
+     * 
+     * @param allowPartialLine If true, then a partial line that is longer than readBufLen is 
+     * returned. If false, false is returned.
+     * 
+     * @param filter Function to filter input
+     * 
+     * @return true if there is data available, false if not. If false is returned, readBufLen
+     * will also be set to 0.
+     * 
+     * The filter function has this prototype and can be a lambda:
+     * 
+     * bool myFilter(uint8_t *readBuf, size_t &readBufLen)
+     * 
+     * - readBuf is the beginning of the line, and will be equal to readBuf passed into readLineFilter()
+     * - readBufLen is the length of the line. The line will not contain a trailing null!
+     * 
+     * If the filter function returns true, the buffer will be returned to the caller of readLineFilter().
+     * Your filter function can modify readBuf and readBufLen in place if desired.
+     * 
+     * If the filter function returns false, then the caller of readLineFilter() will get a false response
+     * as well. 
+     */
+    bool readLineFilter(size_t &readIndex, uint8_t *readBuf, size_t &readBufLen, bool allowPartialLine, std::function<bool(uint8_t *readBuf, size_t &readBufLen)> filter);
+
+
     /**
      * @brief Mutex lock, used to safely access the buffer
      * 

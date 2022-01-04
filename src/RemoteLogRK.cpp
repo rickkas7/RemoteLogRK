@@ -151,6 +151,78 @@ bool RemoteLog::readLines(size_t &readIndex, uint8_t *readBuf, size_t &readBufLe
 }
 
 
+bool RemoteLog::readLineFilter(size_t &readIndex, uint8_t *readBuf, size_t &readBufLen, bool allowPartialLine,
+    std::function<bool(uint8_t *readBuf, size_t &readBufLen)> filter) {
+    WITH_LOCK(*this) {
+        size_t bufDataLen = getBufDataLen();
+        RemoteLogBufHeader *hdr = getBufHeader();
+        
+        // Log.info("readLineFilter readIndex=%u writeIndex=%u", readIndex, hdr->writeIndex);
+
+        if ((hdr->writeIndex - readIndex) > bufDataLen) {
+            // readOffset is too far back, limit to available data
+            readIndex = hdr->writeIndex - bufDataLen;
+        }
+        if (readIndex >= hdr->writeIndex) {
+            // Nothing to read
+            readBufLen = 0;
+            return false;
+        }
+
+        // Copy data
+        size_t index;
+        size_t startOfLine = 0;
+        for(index = 0; (readIndex + index) < hdr->writeIndex && index < readBufLen; index++) {
+            readBuf[index] = getBufData()[(readIndex + index) % bufDataLen];
+            if (readBuf[index] == '\n') {
+                startOfLine = index + 1;
+
+                index++;
+                break;
+            }
+        }
+        if (startOfLine < index) {
+            // We have a partial line
+            if (startOfLine == 0) {
+                // The line has not been fully written to the buffer yet
+                if (index < readBufLen || !allowPartialLine) {
+                    // Wait for it to be fully written. The index check makes
+                    // sure a line longer than readBufLen will be split instead
+                    // of getting stuck here forever.
+                    readBufLen = 0;
+                    return false;
+                }
+                // Line is longer than readBufLen so include the whole thing
+                // instead of splitting at LF
+                startOfLine = index;
+            }
+
+            readBufLen = startOfLine;
+
+            if (!filter(readBuf, readBufLen)) {
+                // Filter has rejected this line, leave in the buffer
+                readBufLen = 0;
+                return false;
+            }
+
+            readIndex += startOfLine;
+        }
+        else {
+            readBufLen = index;
+
+            if (!filter(readBuf, readBufLen)) {
+                // Filter has rejected this line, leave in the buffer
+                readBufLen = 0;
+                return false;
+            }
+
+            readIndex += index;
+        }
+    }
+    return true;
+}
+
+
 size_t RemoteLog::write(uint8_t c) {
     WITH_LOCK(*this) {
         getBufData()[getBufHeader()->writeIndex++ % getBufDataLen()] = c;
