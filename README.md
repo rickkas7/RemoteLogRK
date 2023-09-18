@@ -61,6 +61,10 @@ The disadvantage is that the transport is not encrypted, there is no authenticat
 
 ## Version History
 
+### 0.0.4
+
+- Switch to using Network.resolve() which was added in Device OS 1.1.0.
+
 ### 0.0.3
 
 - Documentation

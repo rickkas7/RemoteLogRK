@@ -395,13 +395,9 @@ void RemoteLogSyslogUDP::loop(size_t &readIndex) {
                 remoteAddr = IPAddress(a[0], a[1], a[2], a[3]);
             }
             else {
-#if Wiring_WiFi
-                remoteAddr = WiFi.resolve(hostname);
-#endif
-#if Wiring_Cellular
-                remoteAddr = Cellular.resolve(hostname);
-#endif
-                // TODO: Add support for Ethernet here
+                if (!remoteAddr) {
+                    remoteAddr = Network.resolve(hostname);
+                }
             }
             // _log.info("sending to %s (%s) port %d", remoteAddr.toString().c_str(), hostname.c_str(), port);
         }
